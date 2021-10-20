@@ -3,3 +3,4 @@ opencv-python==4.5.3.56
 PySimpleGUI==4.43.0
 scipy==1.5.4
 Pillow>=8.3.2
+pywin32
