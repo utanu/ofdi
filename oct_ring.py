@@ -398,8 +398,13 @@ def mk_color_bar():
     return color_bar
 
 
-# RINGの色を計算
 def ring_color(t):
+    """Calculate ring color
+
+    :param t: thickness
+    :return: RGB
+
+    """
     h = 240
     # h = 180
 
@@ -416,9 +421,15 @@ def ring_color(t):
     return hsv_to_rgb(h, 255, 255)
 
 
-# HSV形式からRGB形式に変換
-# R=0 ~ 255, G=0 ~ 255, B=0 ~ 255,
 def hsv_to_rgb(h, s, v):
+    """Covert HSV to RGB
+
+    :param h: hue
+    :param s: saturation
+    :param v: value
+    :return: RGB
+
+    """
     #    h = 0 ~ 360
     #    s = 0 ~ 255
     #    v = 0 ~ 255
