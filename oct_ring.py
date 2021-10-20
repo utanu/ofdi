@@ -9,6 +9,7 @@ import math
 import PySimpleGUI as sg
 import win32clipboard
 import ctypes
+import threading
 import glob
 
 NUM_OF_ANGLES = 360 * 4
@@ -297,9 +298,10 @@ def send_to_clipboard(clip_type, data):
     win32clipboard.CloseClipboard()
 
 
-def cross_section(rotate = 0):
+def cross_section(rotate=0):
     out = []
-    for i in range(len(oimg_list)):
+    global img_list
+    for i in range(max(2, len(img_list))):
         img = oimg_list[i]
         img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         img_hsv[:, :, 1] = img_hsv[:, :, 1] * 0  # 彩度の計算
@@ -363,7 +365,7 @@ def cs_scale(length):
     scale_bar[:] = ccode_2_bgr('#27262d')
 
     for i in range(6):
-        cv2.putText(scale_bar, str(i*(length*0.2)), (int(49*i*2), 12), cv2.FONT_HERSHEY_PLAIN, 1, (255, 255, 255))
+        cv2.putText(scale_bar, str('{:.1f}'.format(i*(length*0.2))), (int(49*i*2), 12), cv2.FONT_HERSHEY_PLAIN, 1, (255, 255, 255))
 
     # cv2.imshow("out", scale_bar)
     # cv2.waitKey(0)
@@ -406,7 +408,7 @@ def ring_color(t):
     # if t == 0:
     #     return hsv_to_rgb(0, 0, 255)  # V = 0～255で濃淡調整
     # else:
-    h -= h * ((t * (9 / WIDTH)) / THICKNESS_THRESHOLD)
+    h -= h * ((t * (9 / oimg_list[0].shape[0])) / THICKNESS_THRESHOLD)
     if h <= 0:
         h = 0
     # print("h is ", h)
@@ -1087,141 +1089,149 @@ def lumen(fname):
     # print(centroids[1])
     return centroids[1]
 
+
+def make_img():
+    global oimg_list, osimg_list, calim_list, img_list, total_angle_list, max_thickness_list, max_angle_list, thickness, cs_img, css_img
+
+    for i, (p1name, p1oname, p1cname) in enumerate(zip(osimg_list, oimg_list, calim_list)):
+        thickness = []
+        # center = lumen(p1[62])
+        center = [256, 256]
+        oimg = oimg_list[i]
+        osimg = osimg_list[i]
+        img = np.array(osimg)
+        HEIGHT, WIDTH = oimg.shape[1], oimg.shape[0]
+
+        # cv2.imshow("img", img)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+
+        # calim = extract_calcium(img)
+        calim = calim_list[i]
+        gt = cv2.cvtColor(calim, cv2.COLOR_BGR2GRAY)
+
+        # luminance = (0.298912 * calim[:, :, 2] + 0.586611 * calim[:, :, 1] + 0.114478 * calim[:, :, 0])
+        #
+        # # 二値化処理
+        # luminance[luminance < 80] = 0
+        # luminance[luminance >= 80] = 255
+
+        luminance = copy.copy(gt)
+        luminance[luminance <= 10] = 0
+        luminance[luminance > 10] = 255
+
+        # luminance = np.rot90(np.fliplr(luminance))
+
+        # cv2.imshow("img", luminance)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+
+        print(center)
+
+        _, centro = wire_region(oimg)
+
+        total_angle = 0
+        for j in range(NUM_OF_ANGLES):
+            tj = j * (360 / NUM_OF_ANGLES)
+            # x, y = center[0], center[1]
+            x, y = int(centro[1, 0]), int(centro[1, 1])
+            calnum = 0
+            end = [x, y]
+            tmp_thickness = [0]
+
+            while (1):
+                x += math.sin(math.radians(tj))
+                y -= math.cos(math.radians(tj))
+                # print(x, y)
+                if x >= img.shape[1]:
+                    x = img.shape[1] - 1
+                    break
+                if y >= img.shape[0]:
+                    y = img.shape[0] - 1
+                    break
+                if x <= 0:
+                    x = 0
+                    break
+                if y <= 0:
+                    y = 0
+                    break
+
+                if luminance[int(y), int(x)] != 0:
+                    tmp_thickness[calnum] += 1
+                elif tmp_thickness[calnum] != 0:
+                    calnum += 1
+                    tmp_thickness.append(0)
+
+            # print(j, x, y)
+            thickness.append(max(tmp_thickness))
+
+        print("thickness=", thickness)
+        print("Total Angle =", np.count_nonzero(thickness) * 360 / NUM_OF_ANGLES)
+        print("Max Thickness =", max(thickness) * (9 / WIDTH), "mm")
+
+        total_angle_list.append(int(np.count_nonzero(thickness) * 360 / NUM_OF_ANGLES))
+        print(total_angle_list)
+        max_thickness_list.append(max(thickness) * (9 / WIDTH))
+
+        tcount = 0
+        max_angle = 0
+        for t in thickness:
+            if t != 0:
+                tcount += 1
+                if tcount > max_angle:
+                    max_angle = tcount
+            else:
+                tcount = 0
+
+        max_angle_list.append(int(max_angle * 360 / NUM_OF_ANGLES))
+        print(max_angle_list)
+
+        ring = drawring(thickness)
+
+        # cs_img = cv2.resize(cs_img, (512, cs_img.shape[0]))
+
+        img = addborder(osimg, 256)
+        oimg = addborder(oimg, 256)
+        calim = addborder(calim, 256)
+
+        print(len(img), len(oimg), len(calim), len(ring))
+
+        img[:] = np.where(np.any(ring != 0, axis=2, keepdims=True), ring, oimg)
+        # img[:] = np.where(calim[:, :] != 0, calim, img)
+
+        img = img[251:773, 251:773]
+        cv2.drawMarker(img, (int(centro[1, 0]), int(centro[1, 1])), (0, 0, 255), markerSize=20, thickness=1)
+
+        img = dump_remover(img, circle_only=True, color=[45, 38, 39])
+
+        img_list.append(img)
+
+        # cv2.imshow("img", img)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+
+        cs_img = cross_section()
+        cs_img = cv2.resize(cs_img, (570, 80))
+        css_img = cs_scale(len(img_list))
+        css_img = cv2.resize(css_img, (570, css_img.shape[0]))
+
+
 img_list = []
 total_angle_list = []
 max_angle_list = []
 max_thickness_list = []
 
+
 oimg_list = np.load('data/case_191/original.npy')
 osimg_list = np.load('data/case_191/segm.npy')
 calim_list = np.load('data/case_191/cal.npy')
 
-count = 0
+# oimg_list = oimg_list[25:]
+# osimg_list = osimg_list[25:]
+# calim_list = calim_list[25:]
 
-for i, (p1name, p1oname, p1cname) in enumerate(zip(osimg_list, oimg_list, calim_list)):
-    # center = lumen(p1[62])
-    center = [256, 256]
-    oimg = oimg_list[i]
-    osimg = osimg_list[i]
-    img = np.array(osimg)
-    HEIGHT, WIDTH = oimg.shape[1], oimg.shape[0]
-
-    # cv2.imshow("img", img)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-
-    # calim = extract_calcium(img)
-    calim = calim_list[i]
-    gt = cv2.cvtColor(calim, cv2.COLOR_BGR2GRAY)
-
-    # luminance = (0.298912 * calim[:, :, 2] + 0.586611 * calim[:, :, 1] + 0.114478 * calim[:, :, 0])
-    #
-    # # 二値化処理
-    # luminance[luminance < 80] = 0
-    # luminance[luminance >= 80] = 255
-
-    luminance = copy.copy(gt)
-    luminance[luminance <= 10] = 0
-    luminance[luminance > 10] = 255
-
-
-    # luminance = np.rot90(np.fliplr(luminance))
-
-    # cv2.imshow("img", luminance)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-
-    print(center)
-
-    _, centro = wire_region(oimg)
-
-    thickness = []
-    total_angle = 0
-    for j in range(NUM_OF_ANGLES):
-        tj = j * (360 / NUM_OF_ANGLES)
-        # x, y = center[0], center[1]
-        x, y = int(centro[1, 0]), int(centro[1, 1])
-        calnum = 0
-        end = [x, y]
-        tmp_thickness = [0]
-
-        while (1):
-            x += math.sin(math.radians(tj))
-            y -= math.cos(math.radians(tj))
-            # print(x, y)
-            if x >= img.shape[1]:
-                x = img.shape[1] - 1
-                break
-            if y >= img.shape[0]:
-                y = img.shape[0] - 1
-                break
-            if x <= 0:
-                x = 0
-                break
-            if y <= 0:
-                y = 0
-                break
-
-            if luminance[int(y), int(x)] != 0:
-                tmp_thickness[calnum] += 1
-            elif tmp_thickness[calnum] != 0:
-                calnum += 1
-                tmp_thickness.append(0)
-
-        # print(j, x, y)
-        thickness.append(max(tmp_thickness))
-
-    print(thickness)
-    print("Total Angle =", np.count_nonzero(thickness) * 360 / NUM_OF_ANGLES)
-    print("Max Thickness =", max(thickness) * (9 / WIDTH), "mm")
-
-    total_angle_list.append(int(np.count_nonzero(thickness) * 360 / NUM_OF_ANGLES))
-    print(total_angle_list)
-    max_thickness_list.append(max(thickness) * (9 / WIDTH))
-
-    tcount = 0
-    max_angle = 0
-    for t in thickness:
-        if t != 0:
-            tcount += 1
-            if tcount > max_angle:
-                max_angle = tcount
-        else:
-            tcount = 0
-
-    max_angle_list.append(int(max_angle * 360 / NUM_OF_ANGLES))
-    print(max_angle_list)
-
-
-    ring = drawring(thickness)
-
-    # cs_img = cv2.resize(cs_img, (512, cs_img.shape[0]))
-
-    img = addborder(osimg, 256)
-    oimg = addborder(oimg, 256)
-    calim = addborder(calim, 256)
-
-    print(len(img), len(oimg), len(calim), len(ring))
-
-    img[:] = np.where(np.any(ring != 0, axis=2, keepdims=True), ring, oimg)
-    # img[:] = np.where(calim[:, :] != 0, calim, img)
-
-    img = img[251:773, 251:773]
-    cv2.drawMarker(img, (int(centro[1, 0]), int(centro[1, 1])), (0, 0, 255), markerSize=20, thickness=1)
-
-    img = dump_remover(img, circle_only=True, color=[45, 38, 39])
-
-    img_list.append(img)
-
-    # cv2.imshow("img", img)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-
-    count += 1
-
-    if i==4:
-        break
-
+t = threading.Thread(target=make_img)
+t.start()
 
 
 # cv2.imwrite('C:/Users/noeri/PycharmProjects/macro_editor/' + 'oct_ringtest2.jpg', img)
@@ -1232,25 +1242,23 @@ cs_list = []
 #     cs_img = cross_section(i)
 #     cs_img = cv2.resize(cs_img, (512, 80))
 #     cs_list.append(cs_img)
-cs_img = cross_section()
-cs_img = cv2.resize(cs_img, (570, 80))
-css_img = cs_scale(len(oimg_list))
-css_img = cv2.resize(css_img, (570, css_img.shape[0]))
+cs_img = []
+css_img = []
 cbar_img = mk_color_bar()
 
 window_layout = [[sg.Image(filename='', key='image', pad=((0, 0), (0, 0)), background_color=('#27262d')), sg.Image(filename='', key='cbar', pad=((0, 0), (0, 0)), background_color=('#27262d'))],
-                 [[sg.Checkbox('Show calcium', key='sg1', background_color=('#27262d'))]],
+                 # [[sg.Checkbox('Show calcium', key='sg1', background_color=('#27262d'))]],
                  [sg.Text('Max Angle', font=('Arial', 15), background_color=('#27262d')),
-                  sg.Text('               ', font=('Arial', 40), background_color=('#27262d')),
+                  sg.Text('             ', font=('Arial', 40), background_color=('#27262d')),
                   sg.Text('Max Thickness', font=('Arial', 15), background_color=('#27262d'))],
-                 [sg.Text('{:>3f}'.format(int(np.count_nonzero(thickness) * 360 / NUM_OF_ANGLES)), font=('Arial', 45),
+                 [sg.Text('{:>3f}'.format(0), font=('Arial', 45),
                           text_color='#d57231', background_color=('#27262d'), key='angle'),
                   sg.Text('°', font=('Arial', 45), background_color=('#27262d'), text_color='#d57231', key='degree'),
-                  sg.Text('              ', font=('Arial', 40), background_color=('#27262d')),
-                  sg.Text('{:.2f}'.format(max(thickness) * (9 / WIDTH)), font=('Arial', 45),
+                  sg.Text('              ', font=('Arial', 40), background_color=('#27262d'), key='space'),
+                  sg.Text('{:.2f}'.format(0), font=('Arial', 45),
                           background_color=('#27262d'), key='thickness'),
                   sg.Text('mm', font=('Arial', 15), background_color=('#27262d'))],
-                 [sg.Slider(range=(0, count - 1), default_value=count // 2, size=(512, 15), orientation='h',
+                 [sg.Slider(range=(0, len(img_list) - 1), default_value=len(img_list) // 2, size=(512, 15), orientation='h',
                             resolution=1, background_color=('#27262d'), key='sld1')],
                  [sg.Image(filename='', key='cs', pad=((4, 0), (0, 0)), background_color=('#27262d'))
                   # sg.Slider(range=(0, 360), default_value=180, size=(15, 80), orientation='v',
@@ -1262,9 +1270,9 @@ window = sg.Window('OCT', window_layout, size=(600, 820), background_color=('#27
 first = True
 while True:
     event, value = window.read(timeout=20)
-    print(event, value)
+    # print(event, value)
     if first is True:
-        imgbytes = cv2.imencode('.png', img_list[count // 2])[1].tobytes()
+        imgbytes = cv2.imencode('.png', img_list[len(img_list) // 2])[1].tobytes()
         window['image'].update(data=imgbytes)
         imgbytes_cs = cv2.imencode('.png', cs_img)[1].tobytes()
         window['cs'].update(data=imgbytes_cs)
@@ -1274,7 +1282,16 @@ while True:
         window['cbar'].update(data=imgbytes_cbar)
         first = False
 
+
+
+
+
     # if event == 'sld1':
+    window['sld1'].update(range=(0, len(img_list) - 1))
+    imgbytes_cs = cv2.imencode('.png', cs_img)[1].tobytes()
+    window['cs'].update(data=imgbytes_cs)
+    imgbytes_css = cv2.imencode('.png', css_img)[1].tobytes()
+    window['css'].update(data=imgbytes_css)
     if value['sld1'] == False:
         window['image'].update(data=cv2.imencode('.png', img_list[int(value['sld1'])])[1].tobytes())
     else:
@@ -1287,6 +1304,7 @@ while True:
         window['angle'].update(text_color='#ffffff')
         window['degree'].update(text_color='#ffffff')
     window['thickness'].update(max_thickness_list[int(value['sld1'])])
+    window['space'].update(' ' * 10 + '  ' * (3 - len(str(max_angle_list[int(value['sld1'])]))))
     # window['cs'].update(data=cv2.imencode('.png', cs_list[int(value['sld2'])])[1].tobytes())
 
     cv2.destroyAllWindows()
