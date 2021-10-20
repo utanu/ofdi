@@ -1,4 +1,4 @@
-## Automatic extraction and visualization of coronary artery calcium by optical frequency domain imaging
+## Visualization of coronary artery calcium by optical frequency domain imaging
 
 ![demo](examples/demo.png)
 
