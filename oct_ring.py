@@ -1,7 +1,6 @@
 import numpy as np
 import cv2
 import copy
-import glob
 import io
 from scipy.spatial import distance
 from PIL import Image
@@ -10,24 +9,34 @@ import math
 import PySimpleGUI as sg
 import win32clipboard
 import ctypes
-from ctypes import windll
+import glob
 
 NUM_OF_ANGLES = 360 * 4
 THICKNESS_THRESHOLD = 1.0
 
 
 def is_pressed(key):
-    """キーが押されているかどうか判定する
+    """Determine if a key is pressed
 
-        :param key: キーコード
+    :param key: keycode
 
-        """
+    """
     return bool(ctypes.windll.user32.GetAsyncKeyState(key) & 0x8000)
 
 
-def dump_remover(img, circle_only=False):
+def dump_remover(img, circle_only=False, color=None):
+    """Remove output from DICOM viewer
+
+    :param img: image file
+    :param circle_only: if true, just fill in the perimeter
+    :param color: fill color
+
+    :return: return image
+
+    """
     mask = np.full((img.shape[0], img.shape[1], img.shape[2]), 29, dtype=np.uint8)
     image = np.zeros((img.shape[0], img.shape[1], img.shape[2]), np.uint8)
+    cimage = np.zeros((img.shape[0], img.shape[1], img.shape[2]), np.uint8)
 
     if not circle_only:
         if img[int((2345 / 2444) * img.shape[0]), int((1245 / 2444) * img.shape[1])][2] >= 230:
@@ -41,7 +50,11 @@ def dump_remover(img, circle_only=False):
     cv2.circle(mask, center=(int(img.shape[0] / 2), int(img.shape[1] / 2)), radius=int(img.shape[1] / 2),
                color=(255, 255, 255), thickness=-1)
 
-    image[:] = np.where(mask == [255, 255, 255], img, mask)
+    if color is not None:
+        cimage[:, :] = color
+        image[:] = np.where(mask == [255, 255, 255], img, cimage)
+    else:
+        image[:] = np.where(mask == [255, 255, 255], img, mask)
 
     # cv2.imshow(l, cv2.resize(image, (512, 512)))
     # cv2.waitKey(0)
@@ -51,27 +64,35 @@ def dump_remover(img, circle_only=False):
 
 
 def cal_region(img, show=True):
+    """Generate binary masks from physician-labeled images
+
+    :param img: physician-labeled image
+    :param show: if true, display the result
+
+    :returns: image and success or failure
+
+    """
     mistake = False
     blank_mask = np.zeros((img.shape[0], img.shape[1]), np.uint8)
-    # 赤色取り出し(1)
+    # mask of red 1
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     lower = np.array([0, 128, 150])
     upper = np.array([30, 255, 255])
     img_mask = cv2.inRange(hsv, lower, upper)
 
-    # 赤色取り出し(2)
+    # mask of red 2
     lower = np.array([150, 128, 150])
     upper = np.array([179, 255, 255])
     img_mask = img_mask + cv2.inRange(hsv, lower, upper)
 
-    # 黄色取り出し
+    # mask of yellow
     lower = np.array([20, 128, 180])
     upper = np.array([50, 255, 255])
     img_mask = img_mask + cv2.inRange(hsv, lower, upper)
 
     bf = False
     if np.all(img_mask == 0):
-        # 青色取り出し
+        # mask of blue
         lower = np.array([85, 120, 90])
         upper = np.array([130, 255, 255])
         img_mask = cv2.inRange(hsv, lower, upper)
@@ -92,36 +113,28 @@ def cal_region(img, show=True):
     bin_th = 50
     if bf:
         bin_th = 20
-    # 二値化処理
+
+    # binarization
     img_color[luminance < bin_th] = 0
-    # img_color[img_color >= 127] = 255
     img_color[luminance >= bin_th] = 255
 
     gt = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
     ogt = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # 方法2 （OpenCVで実装）
     ret, th = cv2.threshold(gt, 0, 255, cv2.THRESH_OTSU)
 
-    # # カーネルの定義
+    # dilate
     kernel = np.ones((6, 6), np.uint8)
-
-    #
-    # # 膨張・収縮処理(方法2)
     result = cv2.dilate(th, kernel)
-
-    #  result = cv2.erode(result, kernel)
 
     result = th
 
     contours, hierarchy = cv2.findContours(result, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     # print(hierarchy)
     for i, c in enumerate(contours):
-        # print(cv2.contourArea(c))
-        # cv2.fillPoly(result, pts=c.reshape(1, -1, 2), color=(i*60, i*60, i*60))
-        # カルシウムが血管全体を囲うような形の時、外側の輪郭線の外側の親は存在せず-1、外側の輪郭線の内側の親は0
-        # 内側の輪郭線の外側の親は1、内側の輪郭線の内側の親は2となる
-        # これを辿って入れ子になっている領域か判定し、ラベル付けされていない領域とわかれば黒で塗り直す
+        # When calcium surrounds the entire coronary artery, the outer parent of the outer borderline will be -1, the inner parent of the outer borderline will be 0,
+        # the outer parent of the inner borderline will be 1, and the inner parent of the inner borderline will be 2.
+        # Follow this to determine if the area is nested and if it is unlabeled, repaint it in black.
         cn = i
         chain = 0
         while True:
@@ -141,20 +154,15 @@ def cal_region(img, show=True):
     mimg = np.hstack((np.stack((result,) * 3, -1), img))
     # mimg = np.vstack((mimg, np.hstack((cv2.cvtColor(simg, cv2.COLOR_BGR2GRAY), cv2.cvtColor(simg, cv2.COLOR_BGR2GRAY)))))
 
-    # オリジナル画像の高さ・幅を取得
-    # height = mimg.shape[0]
-    # width = mimg.shape[1]
-
-    # (imshowの)画像の大きさを設定
     new_size = (512 * 2, 512)
 
-    # 結果の表示
+    # show result
     if show:
         cv2.imshow("img", cv2.resize(mimg, (int(new_size[0]), int(new_size[1]))))
         cv2.waitKey(0)
-        if mlib.is_pressed(ord('B')):
+        if is_pressed(ord('B')):
             result = blank_mask
-        if mlib.is_pressed(ord('D')):
+        if is_pressed(ord('D')):
             mistake = True
             print("miss")
         cv2.destroyAllWindows()
@@ -162,8 +170,14 @@ def cal_region(img, show=True):
     return result, mistake
 
 
-# 画像結合(縦)
 def lvstack(l):
+    """Merge images vertically
+
+    :param l: list of images
+
+    :return: merged image
+
+    """
     out = l[0]
     for piece in l[1:]:
         print(piece)
@@ -172,8 +186,14 @@ def lvstack(l):
     return out
 
 
-# 画像結合(横)
 def lhstack(l):
+    """Merge images horizontally
+
+    :param l: list of images
+
+    :return: merged image
+
+    """
     out = l[0]
     for i, piece in enumerate(l[1:]):
         print(i)
@@ -183,32 +203,39 @@ def lhstack(l):
 
 
 def pil_2_cv2(pil_image):
-    """PIL形式->OpenCV形式へ画像変換を行う
+    """Convert format to PIL->OpenCV
 
-                    :param pil_image: PIL形式の画像
+    :param pil_image: PIL image
 
-                    """
+    :return: OpenCV image
+
+    """
     open_cv_image = np.array(pil_image)
-    # Convert RGB to BGR (method-1):
     open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
-    # Convert RGB to BGR (method-2):
-    # b, g, r = cv2.split(open_cv_image)
-    # open_cv_image = cv2.merge([r, g, b])
     return open_cv_image
 
 
 def cv2_2_pil(cv2_image):
-    """OpenCV形式->PIL形式へ画像変換を行う
+    """Convert format to OpenCV->PIL
 
-                        :param cv2_image: PIL形式の画像
+    :param cv2_image: OpenCV image
 
-                        """
+    :return: PIL image
+
+    """
     cv2_im = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB)
     pil_im = Image.fromarray(cv2_im)
     return pil_im
 
 
 def ccode_2_bgr(ccode):
+    """Convert colorcode to BGR
+
+    :param ccode: colorcode
+
+    :return: BGR
+
+    """
     R = int(ccode[1:3], 16)
     G = int(ccode[3:5], 16)
     B = int(ccode[5:7], 16)
@@ -216,8 +243,15 @@ def ccode_2_bgr(ccode):
     return (B, G, R)
 
 
-# 外枠追加
 def addborder(image, size, color=None):
+    """Add margins to the image
+
+    :param image: input image
+    :param size: margin size
+    :param color: margin color
+    :return: output image
+
+    """
     bk1 = np.zeros((size, image.shape[1], 3), np.uint8)
     if color is not None:
         bk1[:] = list(color)
@@ -238,7 +272,11 @@ def addborder(image, size, color=None):
 
 
 def copy_to_clipboard(image):
-    # メモリストリームにBMP形式で保存してから読み出す
+    """Copy an image to the clipboard
+
+    :param image: input image
+
+    """
     output = io.BytesIO()
     image.convert('RGB').save(output, 'BMP')
     data = output.getvalue()[14:]
@@ -246,61 +284,17 @@ def copy_to_clipboard(image):
     send_to_clipboard(win32clipboard.CF_DIB, data)
 
 def send_to_clipboard(clip_type, data):
-    # クリップボードをクリアして、データをセットする
+    """Clear the clipboard and set the data
+
+    :param clip_type: clipboard data format (CF_DIB = 8)
+    :param data: BMP image
+    :return:
+
+    """
     win32clipboard.OpenClipboard()
     win32clipboard.EmptyClipboard()
     win32clipboard.SetClipboardData(clip_type, data)
     win32clipboard.CloseClipboard()
-
-
-# 円検出
-def detect_circles(img):
-    image = np.array(img)
-
-    # delete pink
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower = np.array([130, 30, 80])  # 紫に近いピンク
-    upper = np.array([175, 255, 255])  # 赤に近いピンク
-    img_mask = cv2.inRange(hsv, lower, upper)
-    kernel = np.ones((2, 2), np.uint8)
-    img_mask = cv2.dilate(img_mask, kernel)
-
-    image = cv2.bitwise_and(img, img, mask=cv2.bitwise_not(img_mask))
-
-    # delete green
-    lower = np.array([50, 100, 100])
-    upper = np.array([90, 255, 255])
-    img_mask = cv2.inRange(hsv, lower, upper)
-    kernel = np.ones((2, 2), np.uint8)
-    img_mask = cv2.dilate(img_mask, kernel)
-    image = cv2.bitwise_and(image, img, mask=cv2.bitwise_not(img_mask))
-
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    image = cv2.medianBlur(cv2.resize(image[223:289, 223:289], (512, 512)), 5)
-    cimg = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-
-    cv2.imshow('cimg', cimg)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    p2 = 100
-    circles = None
-    while circles is None:
-        circles = cv2.HoughCircles(image, cv2.HOUGH_GRADIENT, 1, 10, param1=50, param2=p2, minRadius=int(23*(512/66)), maxRadius=0)
-        p2 -= 1
-
-
-    circles = np.uint16(np.around(circles))
-    for i in circles[0, :]:
-        # draw the outer circle
-        cv2.circle(cimg, (i[0], i[1]), i[2], (0, 255, 0), 2)
-        # draw the center of the circle
-        cv2.circle(cimg, (i[0], i[1]), 2, (0, 0, 255), 3)
-
-    cv2.imshow('detected circles', cimg)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
 
 
 def cross_section(rotate = 0):
@@ -1215,6 +1209,8 @@ for i, (p1name, p1oname, p1cname) in enumerate(zip(osimg_list, oimg_list, calim_
     img = img[251:773, 251:773]
     cv2.drawMarker(img, (int(centro[1, 0]), int(centro[1, 1])), (0, 0, 255), markerSize=20, thickness=1)
 
+    img = dump_remover(img, circle_only=True, color=[45, 38, 39])
+
     img_list.append(img)
 
     # cv2.imshow("img", img)
@@ -1223,8 +1219,10 @@ for i, (p1name, p1oname, p1cname) in enumerate(zip(osimg_list, oimg_list, calim_
 
     count += 1
 
-    if i == 4:
+    if i==4:
         break
+
+
 
 # cv2.imwrite('C:/Users/noeri/PycharmProjects/macro_editor/' + 'oct_ringtest2.jpg', img)
 
@@ -1241,6 +1239,7 @@ css_img = cv2.resize(css_img, (570, css_img.shape[0]))
 cbar_img = mk_color_bar()
 
 window_layout = [[sg.Image(filename='', key='image', pad=((0, 0), (0, 0)), background_color=('#27262d')), sg.Image(filename='', key='cbar', pad=((0, 0), (0, 0)), background_color=('#27262d'))],
+                 [[sg.Checkbox('Show calcium', key='sg1', background_color=('#27262d'))]],
                  [sg.Text('Max Angle', font=('Arial', 15), background_color=('#27262d')),
                   sg.Text('               ', font=('Arial', 40), background_color=('#27262d')),
                   sg.Text('Max Thickness', font=('Arial', 15), background_color=('#27262d'))],
@@ -1263,6 +1262,7 @@ window = sg.Window('OCT', window_layout, size=(600, 820), background_color=('#27
 first = True
 while True:
     event, value = window.read(timeout=20)
+    print(event, value)
     if first is True:
         imgbytes = cv2.imencode('.png', img_list[count // 2])[1].tobytes()
         window['image'].update(data=imgbytes)
@@ -1275,7 +1275,10 @@ while True:
         first = False
 
     # if event == 'sld1':
-    window['image'].update(data=cv2.imencode('.png', img_list[int(value['sld1'])])[1].tobytes())
+    if value['sld1'] == False:
+        window['image'].update(data=cv2.imencode('.png', img_list[int(value['sld1'])])[1].tobytes())
+    else:
+        window['image'].update(data=cv2.imencode('.png', img_list[int(value['sld1'])])[1].tobytes())
     window['angle'].update(max_angle_list[int(value['sld1'])])
     if max_angle_list[int(value['sld1'])] >= 180:
         window['angle'].update(text_color='#d57231')
